@@ -96,7 +96,6 @@ async function getTikTokStatsViaApify(username) {
          throw new Error("Token Apify manquant (Nécessaire pour TikTok)");
     }
 
-    // CRITIQUE : Utilisation du Tilde (~) et non du Slash (/) pour l'API
     const ACTOR_ID = "clockworks~tiktok-profile-scraper"; 
     const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
     
@@ -122,7 +121,7 @@ async function getTikTokStatsViaApify(username) {
         const runId = runResponse.data.data.id;
         const datasetId = runResponse.data.data.defaultDatasetId;
 
-        // Attente de la fin du robot (Max 40 secondes)
+        // Attente de la fin du robot (Max 45 secondes)
         await waitForApifyRun(runId, APIFY_API_TOKEN);
 
         const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_API_TOKEN}`;
@@ -204,7 +203,8 @@ async function getFacebookStatsViaApify(username) {
 // OUTIL : Attendre qu'Apify termine son travail
 // ==========================================
 async function waitForApifyRun(runId, token) {
-    const checkUrl = `https://api.apify.com/v2/acts/runs/${runId}?token=${token}`;
+    // CRITIQUE : L'URL correcte de l'API Apify pour vérifier un run est "actor-runs" (et non "acts/runs")
+    const checkUrl = `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`;
     let isFinished = false;
     let attempts = 0;
 
