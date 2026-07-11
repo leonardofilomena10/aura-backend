@@ -105,7 +105,18 @@ async function getTikTokStatsViaApify(username) {
 
     try {
         const runResponse = await axios.post(runUrl, {
-            profiles: [cleanUsername]
+            profiles: [cleanUsername],
+            // Injection de tes réglages d'optimisation pour accélérer le robot
+            commentsPerPost: 0,
+            excludePinnedPosts: false,
+            maxFollowersPerProfile: 0,
+            maxFollowingPerProfile: 0,
+            maxRepliesPerComment: 0,
+            shouldDownloadAvatars: false,
+            shouldDownloadCovers: false,
+            shouldDownloadSlideshowImages: false,
+            shouldDownloadVideos: false,
+            topLevelCommentsPerPost: 0
         });
 
         const runId = runResponse.data.data.id;
