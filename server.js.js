@@ -14,9 +14,10 @@ app.use(express.json());
 // ==========================================
 // CONFIGURATION DES CLÉS (Variables d'environnement)
 // ==========================================
+// Clé YouTube officielle
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+// Clé Apify (Pour scraper TikTok, Facebook, Insta...)
 const APIFY_API_TOKEN = process.env.APIFY_API_TOKEN;
-
 
 app.get('/', (req, res) => {
     res.json({ message: "Serveur Aura Analyst opérationnel 🚀 (Mode Scraping Avancé)" });
@@ -45,7 +46,6 @@ app.post('/api/analyze', async (req, res) => {
         res.json({ success: true, data: stats });
 
     } catch (error) {
-        // Log simplifié pour la lisibilité sur Render
         console.error(`Erreur pour ${username} sur ${platform}:`, error.message);
         res.json({ success: false, error: error.message });
     }
@@ -89,23 +89,24 @@ async function getYouTubeStats(username) {
 }
 
 // ==========================================
-// 2. FONCTION TIKTOK (Apify)
+// 2. FONCTION TIKTOK (Apify - clockworks)
 // ==========================================
 async function getTikTokStatsViaApify(username) {
     if (!APIFY_API_TOKEN) {
          throw new Error("Token Apify manquant (Nécessaire pour TikTok)");
     }
 
+    // Le fameux robot avec le "s" et le tilde "~" !
     const ACTOR_ID = "clockworks~tiktok-profile-scraper"; 
     const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
     
-    // On enlève le @ s'il y en a un
+    // On enlève le @ s'il y en a un pour éviter de perturber le robot
     const cleanUsername = username.replace('@', '');
 
     try {
         const runResponse = await axios.post(runUrl, {
             profiles: [cleanUsername],
-            // Injection de tes réglages d'optimisation pour accélérer le robot
+            // Tes réglages JSON d'optimisation
             commentsPerPost: 0,
             excludePinnedPosts: false,
             maxFollowersPerProfile: 0,
@@ -121,44 +122,62 @@ async function getTikTokStatsViaApify(username) {
         const runId = runResponse.data.data.id;
         const datasetId = runResponse.data.data.defaultDatasetId;
 
-        // Attente de la fin du robot (Max 45 secondes)
+        // Attendre que le robot finisse son travail
         await waitForApifyRun(runId, APIFY_API_TOKEN);
 
         const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_API_TOKEN}`;
         const datasetResponse = await axios.get(datasetUrl);
         
         if (!datasetResponse.data || datasetResponse.data.length === 0) {
-            throw new Error("Profil TikTok introuvable (Ou bloqué par captcha)");
+            throw new Error("Profil TikTok introuvable ou bloqué");
         }
 
-        const data = datasetResponse.data[0];
+        // Le robot renvoie un tableau avec les dernières vidéos
+        const posts = datasetResponse.data;
+        const firstPost = posts[0];
+        const author = firstPost.authorMeta || {};
+
+        // Extraction des abonnés
+        const followersCount = author.fans || author.followers || 0;
+
+        // Calcul de la VRAIE moyenne d'engagement
+        let totalViews = 0;
+        let totalInteractions = 0;
+
+        posts.forEach(post => {
+            totalViews += post.playCount || 0;
+            // On additionne Likes (digg) + Commentaires + Partages
+            totalInteractions += (post.diggCount || 0) + (post.commentCount || 0) + (post.shareCount || 0);
+        });
+
+        const avgViews = posts.length > 0 ? Math.floor(totalViews / posts.length) : 0;
+        const avgInteractions = posts.length > 0 ? Math.floor(totalInteractions / posts.length) : 0;
 
         return {
             name: username,
             platform: 'tiktok',
-            subs: parseInt(data.followers) || 0,
-            views: parseInt(data.likes) * 10 || 0, // Approximation
-            interactions: parseInt(data.likes) || 0
+            subs: parseInt(followersCount) || 0,
+            views: avgViews || 0,
+            interactions: avgInteractions || 0
         };
 
     } catch (err) {
-        // En cas de crash technique Apify, on log la vraie raison
         if (err.response && err.response.data) {
-             console.error("Crash APIFY (TikTok):", err.response.data);
+            console.error("Détail erreur Apify (TikTok):", err.response.data);
         }
-        throw new Error(err.message.includes("Profil TikTok") ? err.message : "Échec du scraping TikTok via Apify");
+        throw new Error(err.message.includes("introuvable") ? err.message : "Échec du scraping TikTok via Apify");
     }
 }
 
 // ==========================================
-// 3. FONCTION FACEBOOK (Apify)
+// 3. FONCTION FACEBOOK (Apify - facebook-pages-scraper)
 // ==========================================
 async function getFacebookStatsViaApify(username) {
     if (!APIFY_API_TOKEN) {
          throw new Error("Token Apify manquant (Nécessaire pour Facebook)");
     }
 
-    // CRITIQUE : Utilisation du Tilde (~) 
+    // Utilisation du tilde "~" ici aussi
     const ACTOR_ID = "apify~facebook-pages-scraper"; 
     const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
     
@@ -193,8 +212,8 @@ async function getFacebookStatsViaApify(username) {
 
     } catch (err) {
         if (err.response && err.response.data) {
-            console.error("Crash APIFY (FB):", err.response.data);
-       }
+            console.error("Détail erreur Apify (FB):", err.response.data);
+        }
         throw new Error(err.message.includes("Page Facebook") ? err.message : "Échec du scraping Facebook via Apify");
     }
 }
@@ -203,14 +222,14 @@ async function getFacebookStatsViaApify(username) {
 // OUTIL : Attendre qu'Apify termine son travail
 // ==========================================
 async function waitForApifyRun(runId, token) {
-    // CRITIQUE : L'URL correcte de l'API Apify pour vérifier un run est "actor-runs" (et non "acts/runs")
+    // URL corrigée "actor-runs"
     const checkUrl = `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`;
     let isFinished = false;
     let attempts = 0;
 
-    // Le front-end a un timeout de 60s, ici on arrête d'attendre au bout de ~45s (15 * 3s)
-    while (!isFinished && attempts < 15) { 
-        await new Promise(resolve => setTimeout(resolve, 3000)); 
+    // Attente maximum de ~45/50 secondes
+    while (!isFinished && attempts < 16) { 
+        await new Promise(resolve => setTimeout(resolve, 3000)); // Pause de 3 secondes
         const response = await axios.get(checkUrl);
         const status = response.data.data.status;
         
@@ -221,9 +240,9 @@ async function waitForApifyRun(runId, token) {
         }
         attempts++;
     }
-
+    
     if (!isFinished) {
-        throw new Error("Apify a pris trop de temps (Timeout)");
+        throw new Error("Délai d'attente dépassé pour Apify");
     }
 }
 
