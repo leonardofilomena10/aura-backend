@@ -14,10 +14,7 @@ app.use(express.json());
 // ==========================================
 // CONFIGURATION DES CLÉS (Variables d'environnement)
 // ==========================================
-// Clé YouTube officielle
 const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-
-// Clé Apify (Pour scraper TikTok, Facebook, Insta...)
 const APIFY_API_TOKEN = process.env.APIFY_API_TOKEN;
 
 
@@ -48,13 +45,14 @@ app.post('/api/analyze', async (req, res) => {
         res.json({ success: true, data: stats });
 
     } catch (error) {
+        // Log simplifié pour la lisibilité sur Render
         console.error(`Erreur pour ${username} sur ${platform}:`, error.message);
         res.json({ success: false, error: error.message });
     }
 });
 
 // ==========================================
-// 1. FONCTION YOUTUBE (Garde l'API Officielle v3)
+// 1. FONCTION YOUTUBE (API Officielle v3)
 // ==========================================
 async function getYouTubeStats(username) {
     if (!YOUTUBE_API_KEY) {
@@ -91,24 +89,21 @@ async function getYouTubeStats(username) {
 }
 
 // ==========================================
-// 2. FONCTION TIKTOK (Via le robot Apify : clockworks/tiktok-profile-scraper)
+// 2. FONCTION TIKTOK (Apify)
 // ==========================================
 async function getTikTokStatsViaApify(username) {
     if (!APIFY_API_TOKEN) {
          throw new Error("Token Apify manquant (Nécessaire pour TikTok)");
     }
 
-    // Le bon nom de l'Actor (avec le "s" à clockworks)
-    const ACTOR_ID = "clockworks/tiktok-profile-scraper"; 
-    
-    // 1. Lancer la tâche de scraping (Run)
+    // CRITIQUE : Utilisation du Tilde (~) et non du Slash (/) pour l'API
+    const ACTOR_ID = "clockworks~tiktok-profile-scraper"; 
     const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
     
-    // Nettoyage du pseudo
+    // On enlève le @ s'il y en a un
     const cleanUsername = username.replace('@', '');
 
     try {
-        // On envoie le pseudo directement dans un tableau (optimisé pour ce robot)
         const runResponse = await axios.post(runUrl, {
             profiles: [cleanUsername]
         });
@@ -116,15 +111,14 @@ async function getTikTokStatsViaApify(username) {
         const runId = runResponse.data.data.id;
         const datasetId = runResponse.data.data.defaultDatasetId;
 
-        // 2. Attendre que le robot termine
+        // Attente de la fin du robot (Max 40 secondes)
         await waitForApifyRun(runId, APIFY_API_TOKEN);
 
-        // 3. Récupérer les résultats
         const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_API_TOKEN}`;
         const datasetResponse = await axios.get(datasetUrl);
         
         if (!datasetResponse.data || datasetResponse.data.length === 0) {
-            throw new Error("Profil TikTok introuvable ou bloqué par sécurité");
+            throw new Error("Profil TikTok introuvable (Ou bloqué par captcha)");
         }
 
         const data = datasetResponse.data[0];
@@ -138,21 +132,24 @@ async function getTikTokStatsViaApify(username) {
         };
 
     } catch (err) {
-        // En cas d'erreur avec Apify, on logue les détails dans Render pour le débogage
-        console.error("Détail de l'erreur Apify:", err.response ? err.response.data : err.message);
-        throw new Error("Échec du scraping TikTok via Apify");
+        // En cas de crash technique Apify, on log la vraie raison
+        if (err.response && err.response.data) {
+             console.error("Crash APIFY (TikTok):", err.response.data);
+        }
+        throw new Error(err.message.includes("Profil TikTok") ? err.message : "Échec du scraping TikTok via Apify");
     }
 }
 
 // ==========================================
-// 3. FONCTION FACEBOOK (Via Apify : apify/facebook-pages-scraper)
+// 3. FONCTION FACEBOOK (Apify)
 // ==========================================
 async function getFacebookStatsViaApify(username) {
     if (!APIFY_API_TOKEN) {
          throw new Error("Token Apify manquant (Nécessaire pour Facebook)");
     }
 
-    const ACTOR_ID = "apify/facebook-pages-scraper"; 
+    // CRITIQUE : Utilisation du Tilde (~) 
+    const ACTOR_ID = "apify~facebook-pages-scraper"; 
     const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
     
     const profileUrl = `https://www.facebook.com/${username}`;
@@ -171,7 +168,7 @@ async function getFacebookStatsViaApify(username) {
         const datasetResponse = await axios.get(datasetUrl);
         
         if (!datasetResponse.data || datasetResponse.data.length === 0) {
-            throw new Error("Page Facebook introuvable ou inaccessible");
+            throw new Error("Page Facebook introuvable");
         }
 
         const data = datasetResponse.data[0];
@@ -185,8 +182,10 @@ async function getFacebookStatsViaApify(username) {
         };
 
     } catch (err) {
-        console.error("Détail erreur FB:", err.response ? err.response.data : err.message);
-        throw new Error("Échec du scraping Facebook via Apify");
+        if (err.response && err.response.data) {
+            console.error("Crash APIFY (FB):", err.response.data);
+       }
+        throw new Error(err.message.includes("Page Facebook") ? err.message : "Échec du scraping Facebook via Apify");
     }
 }
 
@@ -198,22 +197,22 @@ async function waitForApifyRun(runId, token) {
     let isFinished = false;
     let attempts = 0;
 
-    // On attend jusqu'à 50 secondes maximum (25 essais de 2 secondes)
-    while (!isFinished && attempts < 25) { 
-        await new Promise(resolve => setTimeout(resolve, 2000)); 
+    // Le front-end a un timeout de 60s, ici on arrête d'attendre au bout de ~45s (15 * 3s)
+    while (!isFinished && attempts < 15) { 
+        await new Promise(resolve => setTimeout(resolve, 3000)); 
         const response = await axios.get(checkUrl);
         const status = response.data.data.status;
         
         if (status === 'SUCCEEDED') {
             isFinished = true;
         } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
-            throw new Error(`Statut du robot Apify : ${status}`);
+            throw new Error("Le robot Apify a échoué en cours de route");
         }
         attempts++;
     }
 
     if (!isFinished) {
-        throw new Error("Le robot a pris trop de temps (Timeout)");
+        throw new Error("Apify a pris trop de temps (Timeout)");
     }
 }
 
