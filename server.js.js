@@ -1,250 +1,213 @@
-// AURA ANALYST - BACKEND SERVEUR (MODE PRODUCTION AVANCÉ AVEC SCRAPING)
-
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-require('dotenv').config(); 
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-
 app.use(cors());
 app.use(express.json());
 
+const PORT = process.env.PORT || 10000;
+
 // ==========================================
-// CONFIGURATION DES CLÉS (Variables d'environnement)
+// OUTILS ET CAPTEURS DE SÉCURITÉ APIFY
 // ==========================================
-// Clé YouTube officielle
-const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-// Clé Apify (Pour scraper TikTok, Facebook, Insta...)
-const APIFY_API_TOKEN = process.env.APIFY_API_TOKEN;
+async function waitForApifyRun(runId, token) {
+    const checkUrl = `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`;
+    let attempts = 0;
+    const maxAttempts = 20; // 20 essais * 2 secondes = 40 secondes max
 
-app.get('/', (req, res) => {
-    res.json({ message: "Serveur Aura Analyst opérationnel 🚀 (Mode Scraping Avancé)" });
-});
-
-app.post('/api/analyze', async (req, res) => {
-    const { username, platform } = req.body;
-
-    if (!username || !platform) {
-        return res.json({ success: false, error: "Username et platform requis" });
+    while (attempts < maxAttempts) {
+        const response = await axios.get(checkUrl);
+        const runStatus = response.data.data.status;
+        
+        if (runStatus === 'SUCCEEDED') return true;
+        if (runStatus === 'FAILED' || runStatus === 'ABORTED' || runStatus === 'TIMED-OUT') return false;
+        
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        attempts++;
     }
-
-    try {
-        let stats = null;
-
-        if (platform === 'youtube') {
-            stats = await getYouTubeStats(username);
-        } else if (platform === 'tiktok') {
-            stats = await getTikTokStatsViaApify(username);
-        } else if (platform === 'facebook') {
-            stats = await getFacebookStatsViaApify(username);
-        } else {
-            return res.json({ success: false, error: "Plateforme non reconnue" });
-        }
-
-        res.json({ success: true, data: stats });
-
-    } catch (error) {
-        console.error(`Erreur pour ${username} sur ${platform}:`, error.message);
-        res.json({ success: false, error: error.message });
-    }
-});
+    return false;
+}
 
 // ==========================================
-// 1. FONCTION YOUTUBE (API Officielle v3)
+// CONTROLLER 1 : YOUTUBE (API OFFICIELLE)
 // ==========================================
-async function getYouTubeStats(username) {
-    if (!YOUTUBE_API_KEY) {
-         throw new Error("Clé API YouTube manquante");
-    }
+async function getYouTubeStats(channelName) {
+    const API_KEY = process.env.YOUTUBE_API_KEY;
+    if (!API_KEY) throw new Error("Clé YouTube manquante sur Render.");
 
-    const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${username}&key=${YOUTUBE_API_KEY}`;
-    const searchResponse = await axios.get(searchUrl);
+    // Étape A : Trouver le ChannelID via le nom d'usage
+    const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=channel&q=${encodeURIComponent(channelName)}&key=${API_KEY}`;
+    const searchRes = await axios.get(searchUrl);
+    if (!searchRes.data.items || searchRes.data.items.length === 0) throw new Error("Chaîne YouTube introuvable.");
     
-    if (!searchResponse.data.items || searchResponse.data.items.length === 0) {
-        throw new Error("Chaîne YouTube introuvable");
+    const channelId = searchRes.data.items[0].snippet.channelId;
+
+    // Étape B : Extraction des statistiques globales
+    const statsUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics,snippet&id=${channelId}&key=${API_KEY}`;
+    const statsRes = await axios.get(statsUrl);
+    const channelInfo = statsRes.data.items[0];
+
+    const subs = parseInt(channelInfo.statistics.subscriberCount) || 0;
+    const totalViews = parseInt(channelInfo.statistics.viewCount) || 0;
+    const totalVideos = parseInt(channelInfo.statistics.videoCount) || 1;
+    const estimatedViews = Math.round(totalViews / totalVideos);
+
+    // Étape C : Échantillonnage des interactions récentes
+    const videosUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&channelId=${channelId}&maxResults=5&order=date&type=video&key=${API_KEY}`;
+    const videosRes = await axios.get(videosUrl);
+    let totalInteractions = 0;
+
+    if (videosRes.data.items && videosRes.data.items.length > 0) {
+        const videoIds = videosRes.data.items.map(item => item.id.videoId).join(',');
+        const detailUrl = `https://www.googleapis.com/youtube/v3/videos?part=statistics&id=${videoIds}&key=${API_KEY}`;
+        const detailRes = await axios.get(detailUrl);
+        
+        detailRes.data.items.forEach(v => {
+            const likes = parseInt(v.statistics.likeCount) || 0;
+            const comments = parseInt(v.statistics.commentCount) || 0;
+            totalInteractions += (likes + comments);
+        });
     }
-    
-    const channelId = searchResponse.data.items[0].snippet.channelId;
-
-    const statsUrl = `https://www.googleapis.com/youtube/v3/channels?part=statistics&id=${channelId}&key=${YOUTUBE_API_KEY}`;
-    const statsResponse = await axios.get(statsUrl);
-    const channelStats = statsResponse.data.items[0].statistics;
-
-    const subCount = parseInt(channelStats.subscriberCount) || 0;
-    const totalViews = parseInt(channelStats.viewCount) || 0;
-    const videoCount = parseInt(channelStats.videoCount) || 1;
-    
-    const avgViews = Math.floor(totalViews / videoCount);
-    const estimatedInteractions = Math.floor(avgViews * 0.05); 
 
     return {
-        name: username,
+        name: channelInfo.snippet.title,
         platform: 'youtube',
-        subs: subCount,
-        views: avgViews,
-        interactions: estimatedInteractions
+        subs: subs,
+        views: estimatedViews,
+        interactions: totalInteractions === 0 ? Math.round(estimatedViews * 0.05) : totalInteractions
     };
 }
 
 // ==========================================
-// 2. FONCTION TIKTOK (Apify - clockworks)
+// CONTROLLER 2 : TIKTOK (APIFY OPTIMISÉ)
 // ==========================================
 async function getTikTokStatsViaApify(username) {
-    if (!APIFY_API_TOKEN) {
-         throw new Error("Token Apify manquant (Nécessaire pour TikTok)");
-    }
+    const API_TOKEN = process.env.APIFY_API_TOKEN;
+    if (!API_TOKEN) throw new Error("Clé APIFY_API_TOKEN manquante.");
 
-    // Le fameux robot avec le "s" et le tilde "~" !
-    const ACTOR_ID = "clockworks~tiktok-profile-scraper"; 
-    const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
-    
-    // On enlève le @ s'il y en a un pour éviter de perturber le robot
-    const cleanUsername = username.replace('@', '');
+    const ACTOR_ID = "clockworks~tiktok-profile-scraper";
+    const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${API_TOKEN}`;
+    const cleanUsername = username.replace('@', '').trim();
+
+    // Lancement du robot avec le JSON optimisé
+    const runResponse = await axios.post(runUrl, {
+        profiles: [cleanUsername],
+        commentsPerPost: 0,
+        excludePinnedPosts: false,
+        maxFollowersPerProfile: 0,
+        maxFollowingPerProfile: 0,
+        maxRepliesPerComment: 0,
+        shouldDownloadAvatars: false,
+        shouldDownloadCovers: false,
+        shouldDownloadSlideshowImages: false,
+        shouldDownloadVideos: false,
+        topLevelCommentsPerPost: 0
+    });
+
+    const runId = runResponse.data.data.id;
+    const isSuccess = await waitForApifyRun(runId, API_TOKEN);
+    if (!isSuccess) throw new Error("Le robot TikTok n'a pas répondu à temps.");
+
+    // Récupération du stockage
+    const datasetUrl = `https://api.apify.com/v2/datasets/${runResponse.data.data.defaultDatasetId}/items?token=${API_TOKEN}`;
+    const datasetRes = await axios.get(datasetUrl);
+    const items = datasetRes.data;
+
+    if (!items || items.length === 0) throw new Error("Compte inexistant ou protégé.");
+
+    let totalViews = 0;
+    let totalInteractions = 0;
+    const authorName = items[0].authorMeta?.name || cleanUsername;
+    const followers = items[0].authorMeta?.fans || 0;
+
+    // Compilation des métriques des posts récents
+    items.forEach(item => {
+        totalViews += (item.playCount || 0);
+        const interactions = (item.diggCount || 0) + (item.commentCount || 0) + (item.shareCount || 0);
+        totalInteractions += interactions;
+    });
+
+    const averageViews = items.length > 0 ? Math.round(totalViews / items.length) : 0;
+
+    return {
+        name: authorName,
+        platform: 'tiktok',
+        subs: followers,
+        views: averageViews,
+        interactions: totalInteractions
+    };
+}
+
+// ==========================================
+// CONTROLLER 3 : FACEBOOK (APIFY SCRAPER)
+// ==========================================
+async function getFacebookStatsViaApify(pageName) {
+    const API_TOKEN = process.env.APIFY_API_TOKEN;
+    if (!API_TOKEN) throw new Error("Clé APIFY_API_TOKEN manquante.");
+
+    const ACTOR_ID = "apify~facebook-pages-scraper";
+    const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${API_TOKEN}`;
+    const cleanName = pageName.replace('@', '').trim();
+
+    const runResponse = await axios.post(runUrl, {
+        startUrls: [{ url: `https://www.facebook.com/${cleanName}` }],
+        maxPosts: 3,
+        resultsLimit: 1
+    });
+
+    const runId = runResponse.data.data.id;
+    const isSuccess = await waitForApifyRun(runId, API_TOKEN);
+    if (!isSuccess) throw new Error("Le robot Facebook a expiré.");
+
+    const datasetUrl = `https://api.apify.com/v2/datasets/${runResponse.data.data.defaultDatasetId}/items?token=${API_TOKEN}`;
+    const datasetRes = await axios.get(datasetUrl);
+    const items = datasetRes.data;
+
+    if (!items || items.length === 0) throw new Error("Page Facebook introuvable.");
+
+    const info = items[0];
+    const likes = info.likes || info.followers || 0;
+
+    return {
+        name: info.name || cleanName,
+        platform: 'facebook',
+        subs: likes,
+        views: Math.round(likes * 0.15), 
+        interactions: parseInt(info.commentsCount || 0) + parseInt(info.likesCount || 0)
+    };
+}
+
+// ==========================================
+// ROUTE PRINCIPALE DE L'API
+// ==========================================
+app.post('/api/analyze', async (req, res) => {
+    const { username, platform } = req.body;
+
+    if (!username || !platform) {
+        return res.status(400).json({ success: false, error: "Paramètres manquants." });
+    }
 
     try {
-        const runResponse = await axios.post(runUrl, {
-            profiles: [cleanUsername],
-            // Tes réglages JSON d'optimisation
-            commentsPerPost: 0,
-            excludePinnedPosts: false,
-            maxFollowersPerProfile: 0,
-            maxFollowingPerProfile: 0,
-            maxRepliesPerComment: 0,
-            shouldDownloadAvatars: false,
-            shouldDownloadCovers: false,
-            shouldDownloadSlideshowImages: false,
-            shouldDownloadVideos: false,
-            topLevelCommentsPerPost: 0
-        });
-
-        const runId = runResponse.data.data.id;
-        const datasetId = runResponse.data.data.defaultDatasetId;
-
-        // Attendre que le robot finisse son travail
-        await waitForApifyRun(runId, APIFY_API_TOKEN);
-
-        const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_API_TOKEN}`;
-        const datasetResponse = await axios.get(datasetUrl);
-        
-        if (!datasetResponse.data || datasetResponse.data.length === 0) {
-            throw new Error("Profil TikTok introuvable ou bloqué");
+        let metricsData;
+        if (platform === 'youtube') {
+            metricsData = await getYouTubeStats(username);
+        } else if (platform === 'tiktok') {
+            metricsData = await getTikTokStatsViaApify(username);
+        } else if (platform === 'facebook') {
+            metricsData = await getFacebookStatsViaApify(username);
+        } else {
+            return res.status(400).json({ success: false, error: "Plateforme inconnue." });
         }
 
-        // Le robot renvoie un tableau avec les dernières vidéos
-        const posts = datasetResponse.data;
-        const firstPost = posts[0];
-        const author = firstPost.authorMeta || {};
+        return res.json({ success: true, data: metricsData });
 
-        // Extraction des abonnés
-        const followersCount = author.fans || author.followers || 0;
-
-        // Calcul de la VRAIE moyenne d'engagement
-        let totalViews = 0;
-        let totalInteractions = 0;
-
-        posts.forEach(post => {
-            totalViews += post.playCount || 0;
-            // On additionne Likes (digg) + Commentaires + Partages
-            totalInteractions += (post.diggCount || 0) + (post.commentCount || 0) + (post.shareCount || 0);
-        });
-
-        const avgViews = posts.length > 0 ? Math.floor(totalViews / posts.length) : 0;
-        const avgInteractions = posts.length > 0 ? Math.floor(totalInteractions / posts.length) : 0;
-
-        return {
-            name: username,
-            platform: 'tiktok',
-            subs: parseInt(followersCount) || 0,
-            views: avgViews || 0,
-            interactions: avgInteractions || 0
-        };
-
-    } catch (err) {
-        if (err.response && err.response.data) {
-            console.error("Détail erreur Apify (TikTok):", err.response.data);
-        }
-        throw new Error(err.message.includes("introuvable") ? err.message : "Échec du scraping TikTok via Apify");
+    } catch (error) {
+        console.error(`Erreur pour ${username} sur ${platform}:`, error.message);
+        return res.status(500).json({ success: false, error: error.message });
     }
-}
-
-// ==========================================
-// 3. FONCTION FACEBOOK (Apify - facebook-pages-scraper)
-// ==========================================
-async function getFacebookStatsViaApify(username) {
-    if (!APIFY_API_TOKEN) {
-         throw new Error("Token Apify manquant (Nécessaire pour Facebook)");
-    }
-
-    // Utilisation du tilde "~" ici aussi
-    const ACTOR_ID = "apify~facebook-pages-scraper"; 
-    const runUrl = `https://api.apify.com/v2/acts/${ACTOR_ID}/runs?token=${APIFY_API_TOKEN}`;
-    
-    const profileUrl = `https://www.facebook.com/${username}`;
-
-    try {
-        const runResponse = await axios.post(runUrl, {
-            startUrls: [{ url: profileUrl }]
-        });
-
-        const runId = runResponse.data.data.id;
-        const datasetId = runResponse.data.data.defaultDatasetId;
-
-        await waitForApifyRun(runId, APIFY_API_TOKEN);
-
-        const datasetUrl = `https://api.apify.com/v2/datasets/${datasetId}/items?token=${APIFY_API_TOKEN}`;
-        const datasetResponse = await axios.get(datasetUrl);
-        
-        if (!datasetResponse.data || datasetResponse.data.length === 0) {
-            throw new Error("Page Facebook introuvable");
-        }
-
-        const data = datasetResponse.data[0];
-
-        return {
-            name: username,
-            platform: 'facebook',
-            subs: parseInt(data.followers) || parseInt(data.likes) || 0,
-            views: Math.floor((parseInt(data.followers) || 0) * 0.2), 
-            interactions: Math.floor((parseInt(data.followers) || 0) * 0.02)
-        };
-
-    } catch (err) {
-        if (err.response && err.response.data) {
-            console.error("Détail erreur Apify (FB):", err.response.data);
-        }
-        throw new Error(err.message.includes("Page Facebook") ? err.message : "Échec du scraping Facebook via Apify");
-    }
-}
-
-// ==========================================
-// OUTIL : Attendre qu'Apify termine son travail
-// ==========================================
-async function waitForApifyRun(runId, token) {
-    // URL corrigée "actor-runs"
-    const checkUrl = `https://api.apify.com/v2/actor-runs/${runId}?token=${token}`;
-    let isFinished = false;
-    let attempts = 0;
-
-    // Attente maximum de ~45/50 secondes
-    while (!isFinished && attempts < 16) { 
-        await new Promise(resolve => setTimeout(resolve, 3000)); // Pause de 3 secondes
-        const response = await axios.get(checkUrl);
-        const status = response.data.data.status;
-        
-        if (status === 'SUCCEEDED') {
-            isFinished = true;
-        } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
-            throw new Error("Le robot Apify a échoué en cours de route");
-        }
-        attempts++;
-    }
-    
-    if (!isFinished) {
-        throw new Error("Délai d'attente dépassé pour Apify");
-    }
-}
+});
 
 app.listen(PORT, () => {
     console.log(`✅ Serveur Aura Backend démarré sur le port ${PORT}`);
